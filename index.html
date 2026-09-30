@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <script src="oauth-bootstrap.js"></script>
+  <script src="oauth-bootstrap.stub.js"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#3a5c89">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="没心机">
   <!-- app.js 由 db.js 在点「进入」后注入，勿 preload（避免 iOS 提前拉 1.6MB） -->
-  <link rel="preload" href="auth.js?v=305" as="script">
+  <link rel="preload" href="auth.stub.js?v=363" as="script">
   <link rel="preload" href="ai-api.js" as="script">
   <script>
     (function () {
@@ -308,7 +308,7 @@
       }
     })();
   </script>
-  <script src="db.js?v=310"></script>
+  <script src="db.js?v=364"></script>
 
   <div id="char-st-unlock-overlay" class="char-st-unlock-overlay" hidden>
     <div class="char-st-unlock-backdrop" id="char-st-unlock-backdrop" aria-hidden="true"></div>
@@ -800,6 +800,10 @@
                 <div class="settings-row settings-row-static">
                   <span class="settings-row-l">版本</span>
                   <span class="settings-row-r">没心机 · UI</span>
+                </div>
+                <div class="settings-row settings-row-static">
+                  <span class="settings-row-l">开源代码 · AGPL-3.0</span>
+                  <a class="settings-row-r" href="https://github.com/Kanamememe/meixinji" target="_blank" rel="noopener noreferrer">查看源码 ↗</a>
                 </div>
               </div>
             </section>

@@ -1767,7 +1767,7 @@
   const PRECHAIN = [
     "media-blob.js?v=" + ASSET_V,
     "ai-api.js?v=" + ASSET_V,
-    "auth.js?v=" + ASSET_V,
+    "auth.stub.js?v=" + ASSET_V,
     "ringtones.js?v=" + ASSET_V,
     "voice-ringtone-picker.js?v=" + ASSET_V
   ];

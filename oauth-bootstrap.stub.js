@@ -4,5 +4,6 @@
  *   copy oauth-bootstrap.stub.js oauth-bootstrap.js
  */
 (function () {
-  /* no-op */
+  // 在主应用加载前标记开源模式，账号功能不等待异步启动完成。
+  window.__xxjCloudAuthEnabled = false;
 })();

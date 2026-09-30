@@ -1,4 +1,4 @@
-const CACHE_NAME = "xxj-pwa-v237";
+const CACHE_NAME = "xxj-pwa-public-v238";
 const KEEPALIVE_PERIODIC_TAG = "xxj-keepalive";
 const SCHEDULE_IDB = "xxj_sw_schedule";
 const SCHEDULE_STORE = "due";
@@ -6,15 +6,15 @@ const GITHUB_BACKUP_SCHEDULE_ID = "github_backup_auto";
 
 const PRECACHE_URLS = [
   "./index.html",
-  "./oauth-bootstrap.js",
+  "./oauth-bootstrap.stub.js",
   "./style.css",
-  "./db.js?v=314",
+  "./db.js?v=364",
   "./inline-html.js?v=348",
   "./media-blob.js?v=314",
   "./ringtones.js?v=314",
   "./voice-ringtone-picker.js?v=314",
   "./ai-api.js",
-  "./auth.js?v=314",
+  "./auth.stub.js?v=363",
   "./group.js?v=314",
   "./group.css?v=273",
   "./checkup.js?v=351",

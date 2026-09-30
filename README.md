@@ -30,15 +30,10 @@ git clone <仓库 HTTPS 地址>
 cd meixinji
 ```
 
-### 2. 生成开源版入口脚本（首次必做）
+### 2. 开源版入口已配置
 
-仓库内不含正式版登录文件。在项目根目录执行：
-
-```powershell
-.\scripts\setup-public.ps1
-```
-
-会生成 `auth.js`、`oauth-bootstrap.js`（本地模式，无云登录）。
+此分支直接使用仓库内的 `auth.stub.js`、`oauth-bootstrap.stub.js`（本地模式，无云登录）。
+**无需执行 PowerShell，也无需生成或上传 `auth.js`、`oauth-bootstrap.js`。**
 
 ### 3. 运行
 
@@ -48,6 +43,20 @@ cd meixinji
 
 **部署示例**：GitHub Pages、Cloudflare Pages、Vercel 静态托管等，发布目录即本项目根目录（无 `dist` 构建步骤）。  
 若对外提供可访问的部署实例，请遵守 AGPL 提供源代码获取方式。
+
+### GitHub Pages（手机也能打开）
+
+本仓库已经配置好静态入口，启用一次 Pages 即可：
+
+1. 打开仓库 **Settings → Pages**。
+2. 在 **Build and deployment → Source** 选择 **Deploy from a branch**。
+3. **Branch** 选择 **main**，文件夹选择 **/(root)**，点击 **Save**。
+4. 等待 GitHub 部署成功后，打开 <https://kanamememe.github.io/meixinji/>。
+
+iPhone 可在 Safari 中打开网址，再使用「分享 → 添加到主屏幕」。
+首次聊天前，在应用「设置」中填写自己的 API 地址、API Key 和模型。
+聊天和角色资料保存在当前浏览器内，不会自动在手机与电脑之间同步；更换设备前请使用应用内备份。
+应用「设置 → About」提供本分支的源码链接。
 
 ---
 
