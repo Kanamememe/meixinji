@@ -59,11 +59,24 @@
     return /anthropic\.com/i.test(String(root || ""));
   }
 
+  function getGeminiOpenAiBase(url) {
+    try {
+      if (new URL(String(url || "").trim()).hostname === "generativelanguage.googleapis.com") {
+        return "https://generativelanguage.googleapis.com/v1beta/openai";
+      }
+    } catch (_) {
+      // Other providers retain the existing URL normalization below.
+    }
+    return "";
+  }
+
   /**
    * 还原为 OpenAI 兼容根地址（以 /v1 或 /v4 结尾），供 chat/completions 与 GET /models 共用。
    * @param {string} [url]
    */
   function resolveOpenAiV1Base(url) {
+    const geminiBase = getGeminiOpenAiBase(url);
+    if (geminiBase) return geminiBase;
     const root = stripApiBaseSuffix(url);
     if (!root) return DEFAULT_BASE;
     const ver = getApiVersionSegment(root);
@@ -75,6 +88,8 @@
   /** 依次尝试的 models 列表地址（主路径 + 常见备用路径） */
   function getModelListFetchUrls(rawBaseUrl) {
     const trimmed = String(rawBaseUrl || "").trim() || DEFAULT_BASE;
+    const geminiBase = getGeminiOpenAiBase(trimmed);
+    if (geminiBase) return [`${geminiBase}/models`];
     const root = stripApiBaseSuffix(trimmed);
 
     if (isAnthropicApiRoot(root)) {
@@ -584,7 +599,8 @@
   async function testPing() {
     const data = await chatCompletions({
       messages: [{ role: "user", content: "Reply with exactly: OK" }],
-      max_tokens: 16
+      // Gemini thinking may use the output budget before producing visible text.
+      max_tokens: getGeminiOpenAiBase(getConfig().baseUrl) ? 2048 : 16
     });
     const text =
       data.choices?.[0]?.message?.content?.trim() ||
