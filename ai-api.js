@@ -208,6 +208,7 @@
           const p = /** @type {Record<string, unknown>} */ (part);
           const typ = String(p.type || "").toLowerCase();
           if (
+            p.thought === true ||
             typ === "reasoning" ||
             typ === "thinking" ||
             typ === "reasoning_content" ||
@@ -709,6 +710,7 @@
             const p = /** @type {Record<string, unknown>} */ (part);
             const typ = String(p.type || "").toLowerCase();
             if (
+              p.thought === true ||
               typ === "reasoning" ||
               typ === "thinking" ||
               typ === "reasoning_content" ||

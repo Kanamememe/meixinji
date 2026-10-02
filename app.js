@@ -627,7 +627,7 @@ function isChatInvisibleAssistantReplyError(err) {
 }
 
 function chatInvisibleAssistantReplyExplainText() {
-  return "回复已收到，但聊天区没有可显示的文字，请重试或点「重 roll」";
+  return "模型未返回可显示的正式回复（可能只有草稿或格式异常），请重试或点「重 roll」";
 }
 
 function throwChatInvisibleAssistantReplyError() {
@@ -738,6 +738,7 @@ function readChatCompletionChoiceText(data) {
           if (!part || typeof part !== "object") continue;
           const typ = String(part.type || "").toLowerCase();
           if (
+            part.thought === true ||
             typ === "reasoning" ||
             typ === "thinking" ||
             typ === "reasoning_content" ||
@@ -763,7 +764,7 @@ function readChatCompletionChoiceText(data) {
       for (const part of parts) {
         if (!part || typeof part !== "object") continue;
         const typ = String(part.type || "").toLowerCase();
-        if (typ === "thought" || typ === "thinking") continue;
+        if (part.thought === true || typ === "thought" || typ === "thinking") continue;
         if (typeof part.text === "string") bits.push(part.text);
       }
       const joined = bits.join("").trim();
@@ -778,12 +779,9 @@ function readChatCompletionChoiceText(data) {
   return String(top || "").trim();
 }
 
-/** 从 completion 响应取出助手原文；choices 为空时再从整包 JSON 松散抢救 */
+/** 仅取接口声明的正文；不能从整个响应包抢救 text，以免捞出 reasoning 内容。 */
 function readChatCompletionSalvagedText(data) {
-  let raw = readChatCompletionChoiceText(data);
-  if (String(raw || "").trim()) return raw;
-  const salv = salvageAssistantDisplayReplyFromRaw(JSON.stringify(data), { maxItems: 12 });
-  return salv ? String(salv).trim() : "";
+  return readChatCompletionChoiceText(data);
 }
 
 /** @param {unknown} data */
@@ -881,16 +879,7 @@ function resolveChatAssistStreamCapConfig(ai, opts) {
 function extractOfflineAssistantStreamPreview(partialRaw) {
   const raw = String(partialRaw || "");
   if (!raw.trim()) return "";
-  try {
-    const strip = stripCharLockPlainProtocolBlocksFromText(raw);
-    const parsed = parseAssistantPayloadForDmSurface(strip.text, "offline", raw);
-    const reply = stripOfflineMeetupTagFromAssistantReply(parsed.reply);
-    if (String(reply || "").trim()) {
-      return normalizeOfflineProseForDisplayJoined(reply);
-    }
-  } catch (_) {
-    /* 半段 JSON */
-  }
+  // 尚未收完时只预览顶层 lines；不能将前言、未闭合草稿当作纯文本回复。
   const looseLines = extractLooseAssistantLinesFromRaw(raw, 12, true);
   if (looseLines.length) {
     return normalizeOfflineProseForDisplayJoined(looseLines.join("|||"));
@@ -1023,10 +1012,8 @@ async function awaitImBubbleHumanPacingBeforeReveal(opts) {
 
 /** 流式 JSON 里 lines 数组是否尚未闭合（后面可能还有气泡）。 */
 function imAssistantStreamLinesArrayLikelyOpen(partialRaw) {
-  const s = String(partialRaw || "");
-  const idx = s.search(/"lines"\s*:/i);
-  if (idx < 0) return true;
-  const after = s.slice(idx);
+  const after = assistantTopLevelFieldSource(partialRaw, "lines");
+  if (!after) return true;
   const lb = after.indexOf("[");
   if (lb < 0) return true;
   let depth = 0;
@@ -25517,38 +25504,132 @@ function stripOfflineMeetupTagFromAssistantReply(replyJoined) {
   return segs.join("|||");
 }
 
+/** 仅识别独立的草稿标题，不拦截台词里的 thinking / 思考 等普通词语。 */
+function isAssistantThinkingHeading(text) {
+  return /^(?:#{1,6}\s*)?(?:\*\*|__)?(?:thinking|reasoning|analysis|思考过程|思考過程|思维链|思維鏈)(?:\*\*|__)?\s*[:：]?\s*(?:\*\*|__)?$/i.test(String(text || "").trim());
+}
+
+/** 剥离 JSON 字符串之外的显式草稿块；未闭合块一直隐藏到本轮结束。 */
+function stripAssistantThinkingBlocks(text) {
+  const s = String(text ?? "");
+  let out = "", depth = 0, inString = false, escaped = false;
+  for (let i = 0; i < s.length;) {
+    const c = s[i];
+    if (inString) {
+      out += c;
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      i++;
+      continue;
+    }
+    const rest = s.slice(i);
+    const xml = rest.match(/^<(think|thinking|reasoning)\b[^>]*>/i);
+    if (xml) {
+      const end = new RegExp(`</${xml[1]}\\s*>`, "i").exec(rest.slice(xml[0].length));
+      if (!end) break;
+      out += "\n";
+      i += xml[0].length + end.index + end[0].length;
+      continue;
+    }
+    const atBoundary = i === 0 || s[i - 1] === "\n" || s.slice(Math.max(0, i - 3), i) === "|||";
+    if (atBoundary) {
+      const fence = rest.match(/^[\t ]*```(?:thinking|reasoning|analysis)\b[^\n]*(?:\n|$)/i);
+      if (fence) {
+        const end = /(?:^|\n)[\t ]*```[\t ]*(?:\r?\n|$)/.exec(rest.slice(fence[0].length));
+        if (!end) break;
+        out += "\n";
+        i += fence[0].length + end.index + end[0].length;
+        continue;
+      }
+      const line = rest.split(/\r?\n|\|\|\|/, 1)[0];
+      if (isAssistantThinkingHeading(line)) {
+        const tail = rest.slice(line.length);
+        const final = /(?:\r?\n|\|\|\|)[\t ]*(?:#{1,6}\s*)?(?:\*\*|__)?(?:final(?: answer)?|answer|最终回复|最終回覆|正式回复|正式回覆)(?:\*\*|__)?[\t ]*[:：]?[\t ]*(?:\*\*|__)?[\t ]*(?:\r?\n|\|\|\|)/i.exec(tail);
+        if (!final) break;
+        out += "\n";
+        i += line.length + final.index + final[0].length;
+        continue;
+      }
+    }
+    if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth = Math.max(0, depth - 1);
+    else if (c === '"' && depth > 0) inString = true;
+    out += c;
+    i++;
+  }
+  return out.trim();
+}
+
+/** 正文的最后一道检查；不把协议壳、草稿标题或卡面自检当作角色台词。 */
+function sanitizeAssistantVisibleText(text) {
+  const s = stripAssistantThinkingBlocks(text);
+  if (!s || assistantPlainTextLooksLikeThinkingLeak(s)) return "";
+  const normalized = normalizeAssistantModelJsonText(s);
+  if (/^(?:\{|\[)/.test(normalized) && /"(?:thinking|reasoning|lines|mind|heartVoice|innerState|recalls)"\s*:/i.test(normalized)) return "";
+  return s;
+}
+
+/** 找顶层字段，跳过字符串和嵌套对象中的示例；半段 JSON 也适用。 */
+function assistantTopLevelFieldSource(text, key) {
+  const s = normalizeAssistantModelJsonText(stripAssistantThinkingBlocks(text));
+  const start = s.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") {
+      if (--depth <= 0) return null;
+    } else if (c === '"') {
+      const from = i++;
+      for (; i < s.length; i++) {
+        if (s[i] === "\\") i++;
+        else if (s[i] === '"') break;
+      }
+      if (i >= s.length) return null;
+      const colon = s.slice(i + 1).match(/^\s*:\s*/);
+      if (depth === 1 && colon) {
+        try {
+          if (JSON.parse(s.slice(from, i + 1)) === key) return s.slice(i + 1 + colon[0].length);
+        } catch (_) { /* 不完整字段 */ }
+      }
+    }
+  }
+  return null;
+}
+
+function extractAssistantTopLevelString(text, key, allowUnclosed = false) {
+  const value = assistantTopLevelFieldSource(text, key);
+  return value && value.startsWith('"')
+    ? extractJsonStringFieldLoose('{"value":' + value, "value", allowUnclosed)
+    : null;
+}
+
 /** @param {string} text @param {number} [maxItems] @param {boolean} [includePartial] 流式预览：未闭合的字符串也计入 */
 function extractLooseAssistantLinesFromRaw(text, maxItems = 24, includePartial = false) {
-  const s0 = normalizeAssistantModelJsonText(String(text ?? "")).trim();
-  if (!s0) return [];
-  const idx = s0.search(/"lines"\s*:/i);
-  if (idx < 0) return [];
-  const after = s0.slice(idx);
-  const lb = after.indexOf("[");
-  if (lb < 0) return [];
-  const src = after.slice(lb + 1);
+  const value = assistantTopLevelFieldSource(text, "lines");
+  if (!value || !value.startsWith("[")) return [];
+  const src = value.slice(1);
   const cap = Math.max(1, Math.min(32, Math.floor(Number(maxItems) || 24)));
   /** @type {string[]} */
   const out = [];
   let inStr = false;
   let esc = false;
-  let buf = "";
+  let stringStart = -1;
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
     if (!inStr) {
       if (c === "]") break;
+      if (/\s|,/.test(c)) continue;
       if (c === '"') {
         inStr = true;
         esc = false;
-        buf = "";
-      }
+        stringStart = i;
+      } else break; // 只读字符串元素，不从嵌套对象、草稿或未加引号的内容猜台词。
       continue;
     }
     if (esc) {
-      if (c === "n") buf += "\n";
-      else if (c === "r") buf += "\r";
-      else if (c === "t") buf += "\t";
-      else buf += c;
       esc = false;
       continue;
     }
@@ -25558,57 +25639,28 @@ function extractLooseAssistantLinesFromRaw(text, maxItems = 24, includePartial =
     }
     if (c === '"') {
       inStr = false;
-      const t = String(buf || "").trim();
+      let t;
+      try { t = JSON.parse(src.slice(stringStart, i + 1)).trim(); }
+      catch (_) { break; }
       if (t) out.push(t);
       if (out.length >= cap) break;
       continue;
     }
-    buf += c;
   }
-  if (includePartial && inStr && String(buf || "").trim()) {
-    out.push(String(buf).trim());
+  if (includePartial && inStr) {
+    const partial = extractJsonStringFieldLoose('{"value":' + src.slice(stringStart), "value", true);
+    if (partial && partial.trim()) out.push(partial.trim());
   }
-  const rawOut = out.length ? out : extractUnquotedLooseLinesFromLinesArray(text, cap);
-  return rawOut.filter((ln) => !isAssistantThinkingLeakLine(ln));
-}
-
-/** 截断/非法 JSON：lines 数组里未加引号的台词（如 `(……)`） */
-function extractUnquotedLooseLinesFromLinesArray(text, maxItems = 12) {
-  const s0 = normalizeAssistantModelJsonText(String(text ?? "")).trim();
-  if (!s0) return [];
-  const idx = s0.search(/"lines"\s*:/i);
-  if (idx < 0) return [];
-  const after = s0.slice(idx);
-  const lb = after.indexOf("[");
-  if (lb < 0) return [];
-  let src = after.slice(lb + 1);
-  const rb = src.indexOf("]");
-  if (rb >= 0) src = src.slice(0, rb);
-  src = src.replace(/"(?:\\.|[^"\\])*"/g, " ");
-  const cap = Math.max(1, Math.min(32, Math.floor(Number(maxItems) || 12)));
-  /** @type {string[]} */
-  const out = [];
-  for (const part of src.split(",")) {
-    const t = String(part ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!t) continue;
-    if (/^[\{\[\]"\\]/.test(t)) continue;
-    if (/^(?:lines|heartVoice|innerState|mood|recalls|narration)\b/i.test(t)) continue;
-    out.push(t);
-    if (out.length >= cap) break;
-  }
-  if (!out.length) {
-    const whole = src.replace(/\s+/g, " ").trim();
-    if (whole && /[\u4e00-\u9fff(（]/.test(whole) && !/^[\{\[]/.test(whole)) out.push(whole);
-  }
-  return out;
+  if (out.some(isAssistantThinkingHeading)) return [];
+  return out.map(sanitizeAssistantVisibleText).filter((ln) => ln && !isAssistantThinkingLeakLine(ln));
 }
 
 /** 模型/网关误把英文 CoT、Capturing Nuances 标题等写进 lines 时的单行识别。 */
 function isAssistantThinkingLeakLine(line) {
   const s = String(line || "").trim();
   if (!s) return true;
+  if (isAssistantThinkingHeading(s)) return true;
+  if (/^(?:#{1,6}\s*|[-*]\s*)?(?:\*\*)?(?:卡面细节|卡面細節|人设自检|人設自檢|回复策略|回覆策略)\s*[:：]/.test(s)) return true;
   if (/^\*\*Capturing\b/i.test(s) || /^Capturing Nuances\b/i.test(s)) return true;
   if (/^\*\*[A-Z][a-zA-Z ]{2,48}\*\*$/.test(s)) return true;
   if (/^I'm focusing on the\b/i.test(s)) return true;
@@ -25624,11 +25676,10 @@ function isAssistantThinkingLeakLine(line) {
 /** 无 JSON lines 壳、整段像 reasoning 泄漏时勿当聊天气泡。 */
 function assistantPlainTextLooksLikeThinkingLeak(text) {
   const s = String(text || "").trim();
-  if (!s || /"lines"\s*:/i.test(s)) return false;
-  const lines = s.split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  if (!s) return false;
+  const lines = s.split(/\n+|\|\|\|/).map((x) => x.trim()).filter(Boolean);
   if (!lines.length) return isAssistantThinkingLeakLine(s);
-  if (lines.every(isAssistantThinkingLeakLine)) return true;
-  return isAssistantThinkingLeakLine(lines[0]) && lines.length <= 2;
+  return lines.some(isAssistantThinkingLeakLine);
 }
 
 /** JSON 解析失败或 lines 为空时，从原始模型输出里尽量抢救可展示的台词/旁白（不把整坨 JSON 骨架直接展示）。 */
@@ -25636,30 +25687,30 @@ function salvageAssistantDisplayReplyFromRaw(raw, opts) {
   const offlineProse = Boolean(opts && typeof opts === "object" && opts.offlineProse);
   const splitBubbleSegs = offlineProse ? splitOfflineAssistantBubbleSegments : splitOuterAssistantBubbleSegments;
   const maxItems = Math.max(1, Math.min(32, Math.floor(Number(opts && opts.maxItems) || 12)));
-  const r = String(raw ?? "").trim();
+  const r = stripAssistantThinkingBlocks(raw);
   if (!r) return "";
 
   const loose = extractLooseAssistantLinesFromRaw(r, maxItems);
   if (loose.length) return loose.join("|||");
 
   const narr = normalizeAssistantNarrationText(
-    extractJsonStringFieldLoose(r, "narration", true) ??
-      extractJsonStringFieldLoose(r, "narrator", true) ??
-      extractJsonStringFieldLoose(r, "narrative", true) ??
+    extractAssistantTopLevelString(r, "narration", true) ??
+      extractAssistantTopLevelString(r, "narrator", true) ??
+      extractAssistantTopLevelString(r, "narrative", true) ??
       ""
   );
   if (narr) {
     const segs = splitBubbleSegs(narr);
-    return segs.length ? segs.join("|||") : narr;
+    return sanitizeAssistantVisibleText(segs.length ? segs.join("|||") : narr);
   }
 
   const replyLoose =
-    extractJsonStringFieldLoose(r, "reply", true) ?? extractJsonStringFieldLoose(r, "text", true);
+    extractAssistantTopLevelString(r, "reply", true) ?? extractAssistantTopLevelString(r, "text", true);
   if (replyLoose) {
     const rt = String(replyLoose).trim();
     if (rt) {
       const segs = splitBubbleSegs(rt);
-      return segs.length ? segs.join("|||") : rt;
+      return sanitizeAssistantVisibleText(segs.length ? segs.join("|||") : rt);
     }
   }
 
@@ -25668,7 +25719,7 @@ function salvageAssistantDisplayReplyFromRaw(raw, opts) {
 
 /** JSON 有壳但 lines/reply 为空时，从原始输出抢救可展示正文（IM/当面通用） */
 function coalesceAssistantDisplayReply(reply, rawReply, dmSurface) {
-  let r = stripOfflineMeetupTagFromAssistantReply(String(reply || "").trim());
+  let r = sanitizeAssistantVisibleText(stripOfflineMeetupTagFromAssistantReply(String(reply || "").trim()));
   if (r) return dmSurface !== "offline" ? normalizeImAssistantReplyJoined(r) : r;
   const salv = salvageAssistantDisplayReplyFromRaw(rawReply, {
     maxItems: 12,
@@ -25678,18 +25729,18 @@ function coalesceAssistantDisplayReply(reply, rawReply, dmSurface) {
     const out = stripOfflineMeetupTagFromAssistantReply(salv);
     return dmSurface !== "offline" ? normalizeImAssistantReplyJoined(out) : out;
   }
-  const raw = String(rawReply || "").trim();
+  const raw = stripAssistantThinkingBlocks(rawReply);
   if (!raw) return "";
   const splitSegs = dmSurface === "offline" ? splitOfflineAssistantBubbleSegments : splitOuterAssistantBubbleSegments;
   for (const key of ["content", "text", "message", "output", "response", "prose", "body"]) {
-    const t = String(extractJsonStringFieldLoose(raw, key, true) ?? "").trim();
+    const t = sanitizeAssistantVisibleText(extractAssistantTopLevelString(raw, key, true));
     if (!t || t.length < 2) continue;
     if (/^[\{\[\]"\\]/.test(t) && !/[\u4e00-\u9fff]/.test(t)) continue;
     const segs = splitSegs(t);
     const joined = stripOfflineMeetupTagFromAssistantReply(segs.length ? segs.join("|||") : t);
     if (joined) return dmSurface !== "offline" ? normalizeImAssistantReplyJoined(joined) : joined;
   }
-  const stripped = stripCharLockPlainProtocolBlocksFromText(raw).text.trim();
+  const stripped = sanitizeAssistantVisibleText(stripCharLockPlainProtocolBlocksFromText(raw).text);
   if (stripped && !/^\s*\{/.test(stripped)) {
     if (!/"lines"\s*:/i.test(raw) && assistantPlainTextLooksLikeThinkingLeak(stripped)) return "";
     const segs = splitSegs(stripped);
@@ -25701,6 +25752,8 @@ function coalesceAssistantDisplayReply(reply, rawReply, dmSurface) {
 
 /** @param {string} raw @param {string} [salvageRaw] 当面：lines 为空时从误写键/截断 JSON 抢救正文 */
 function parseOfflineAssistantPayload(raw, salvageRaw) {
+  raw = stripAssistantThinkingBlocks(raw);
+  salvageRaw = stripAssistantThinkingBlocks(salvageRaw ?? raw);
   const parsed = parseChatAssistantPayload(raw, { offlineProse: true });
   if (!String(parsed.reply || "").trim()) {
     const misKeyed = normalizeAssistantNarrationText(String(parsed.narration ?? "").trim());
@@ -25714,7 +25767,7 @@ function parseOfflineAssistantPayload(raw, salvageRaw) {
     if (salvage) {
       for (const key of ["content", "text", "prose", "body"]) {
         const t = normalizeAssistantNarrationText(
-          String(extractJsonStringFieldLoose(salvage, key, true) ?? "").trim()
+          String(extractAssistantTopLevelString(salvage, key, true) ?? "").trim()
         );
         if (!t) continue;
         const parts = splitOfflineAssistantBubbleSegments(t);
@@ -25731,12 +25784,14 @@ function parseOfflineAssistantPayload(raw, salvageRaw) {
     }
   }
   delete parsed.narration;
+  parsed.reply = sanitizeAssistantVisibleText(parsed.reply);
   return parsed;
 }
 
 /** IM：JSON lines 为空时从 salvageRaw 抢救（复用 coalesceAssistantDisplayReply） */
 function parseImAssistantPayload(raw, salvageRaw) {
   const parsed = parseChatAssistantPayload(raw);
+  parsed.reply = sanitizeAssistantVisibleText(parsed.reply);
   if (String(parsed.reply || "").trim()) return parsed;
   const co = coalesceAssistantDisplayReply("", salvageRaw ?? raw, "im");
   if (co) parsed.reply = co;
@@ -26530,17 +26585,19 @@ function buildChatLinesOnlyRepairMessages(rawReply, dmSurface = "im") {
   const sys = offline
     ? [
         "你将收到一段当面晤面模型输出（可能是不完整 JSON）。",
-        "任务：只输出 **一个** JSON 对象，**必填** lines（字符串数组，至少 1 条非空小说段落）。",
+        "任务：只输出 **一个** JSON 对象，**必填** lines（字符串数组）。",
         "正文只能写在 lines；**禁止** narration、narrator、narrative 等键。",
         "若原文里已有可恢复的 lines 片段，请原样整理进 lines；不要编造与原文无关的新剧情。",
-        "可选保留 heartVoice 等键；但 **lines 优先**，不得省略或留空数组。",
+        "可选保留 heartVoice 等键；但 **lines 优先**，不得省略。",
+        "thinking、reasoning、mind、heartVoice、卡面自检和回复规划都不是正文，禁止抄进 lines。若没有可恢复的正式台词或小说正文，返回 {\"lines\":[]}。",
         "禁止 markdown 代码围栏；禁止解释性文字。"
       ].join("\n")
     : [
         "你将收到一段聊天模型输出（可能是不完整 JSON 或只有 speakAs / 心声键）。",
-        "任务：只输出 **一个** JSON 对象，**必填** lines（字符串数组，至少 1 条非空、可展示的对白/叙述）。",
+        "任务：只输出 **一个** JSON 对象，**必填** lines（字符串数组）。",
         "若原文里已有可恢复的 lines 片段，请原样整理进 lines；不要编造与原文无关的新剧情。",
-        "可选保留 speakAs、heartVoice、narration 等其它键；但 **lines 优先**，不得省略或留空数组。",
+        "可选保留 speakAs、heartVoice、narration 等其它键；但 **lines 优先**，不得省略。",
+        "thinking、reasoning、mind、heartVoice、卡面自检和回复规划都不是台词，禁止抄进 lines。若没有可恢复的正式台词，返回 {\"lines\":[]}。",
         "禁止 markdown 代码围栏；禁止解释性文字。"
       ].join("\n");
   const user = ["【模型原文】", String(rawReply || "").trim().slice(0, 14_000)].join("\n");
@@ -47561,7 +47618,7 @@ function parseChatAssistantPayload(raw, opts) {
   const splitBubbleSegs = offlineProse ? splitOfflineAssistantBubbleSegments : splitOuterAssistantBubbleSegments;
   const emptyPan = () => parseHvPanelFieldsFromJson(null);
   const imgFld = { charImageSubject: /** @type {const} */ ("auto") };
-  const original = stripUtf8Bom(String(raw ?? "")).trim();
+  const original = stripAssistantThinkingBlocks(stripUtf8Bom(String(raw ?? "")));
   const t = normalizeAssistantModelJsonText(original);
   const slice = sliceFirstBalancedJsonObject(t);
   if (slice) {
@@ -47616,7 +47673,7 @@ function parseChatAssistantPayload(raw, opts) {
       const recalls = normalizeJsonRecallsField(o);
       const pan = parseHvPanelFieldsFromJson(o);
       const theaterSnapsRaw = extractTheaterSnapsRawFromAssistantJson(o);
-      const narrationFromJson = normalizeAssistantNarrationText(parseNarrationFromAssistantJson(o));
+      const narrationFromJson = sanitizeAssistantVisibleText(normalizeAssistantNarrationText(parseNarrationFromAssistantJson(o)));
       let charImageCaption = parseCharImageCaptionFromAssistantJson(o);
       let charImageUrl = parseCharImageUrlFromAssistantJson(o);
       const charImageSubject = parseImageSubjectFromAssistantJson(o);
@@ -47656,10 +47713,11 @@ function parseChatAssistantPayload(raw, opts) {
       }
       if (parts.length) {
         const oldPLen = parts.length;
+        const hasDraftHeading = parts.some(isAssistantThinkingHeading);
         const keptParts = [];
         const keptIdx = [];
         for (let i = 0; i < parts.length; i++) {
-          const partTrim = String(parts[i] || "").trim();
+          const partTrim = hasDraftHeading ? "" : sanitizeAssistantVisibleText(parts[i]);
           if (isAssistantThinkingLeakLine(partTrim)) continue;
           if (/^\[IMAGE\]/i.test(partTrim)) {
             const c = extractOfflineImageTagCaptionFromRaw(partTrim);
@@ -47685,11 +47743,11 @@ function parseChatAssistantPayload(raw, opts) {
             if (c && !String(charImageCaption || "").trim()) charImageCaption = c.slice(0, 4000);
             continue;
           }
-          keptParts.push(parts[i]);
+          keptParts.push(partTrim);
           keptIdx.push(i);
         }
+        parts = keptParts;
         if (keptIdx.length !== oldPLen) {
-          parts = keptParts;
           const pickI = (arr, fill) =>
             keptIdx.map((i) => (Array.isArray(arr) && i < arr.length ? arr[i] : fill));
           transParts = pickI(transParts, "");
@@ -47878,11 +47936,11 @@ function parseChatAssistantPayload(raw, opts) {
   // 轻度修复：部分中转/模型会把 JSON 截断（缺右括号）导致无法 parse，
   // 但 lines 数组正文仍完整。这里从“松散 JSON”里尽量提取 lines，避免把 ```json / { / "lines": [ ... 逐行拆成多条气泡。
   const looseLines = extractLooseAssistantLinesFromRaw(original, 12);
-  const looseNarrParsed = normalizeAssistantNarrationText(
-    extractJsonStringFieldLoose(original, "narration", true) ??
-      extractJsonStringFieldLoose(original, "narrator", true) ??
+  const looseNarrParsed = sanitizeAssistantVisibleText(normalizeAssistantNarrationText(
+    extractAssistantTopLevelString(original, "narration", true) ??
+      extractAssistantTopLevelString(original, "narrator", true) ??
       ""
-  );
+  ));
   if (looseLines.length) {
     let looseCap = parseCharImageCaptionFromLooseAssistantText(original);
     const looseUrl = parseCharImageUrlFromLooseAssistantText(original);
@@ -47976,7 +48034,7 @@ function parseChatAssistantPayload(raw, opts) {
     };
   }
   const splitPlain = (text) => {
-    const s = String(text ?? "").trim();
+    const s = sanitizeAssistantVisibleText(text);
     if (!s) return [];
     // 若看起来像“协议 JSON/代码围栏”但解析失败：不要按换行拆成多气泡，避免一行一个 token。
     // 旧判定只认 "lines" 或 {\s*"$ ，模型若先输出 narration / 截断在 lines 前会漏判，拆成 ``` / { / "narration" 多条气泡。
@@ -48041,9 +48099,9 @@ function parseChatAssistantPayload(raw, opts) {
       ? salvageAssistantDisplayReplyFromRaw(original, opts)
       : "";
   return {
-    reply: plainParts.length
+    reply: sanitizeAssistantVisibleText(plainParts.length
       ? plainParts.join("|||")
-      : salvFinal || (looksBrokenAssistantJson ? "" : original),
+      : salvFinal || (looksBrokenAssistantJson ? "" : original)),
     recalls: [],
     heartVoice: "",
     lineTranslationsJoined: "",
@@ -66323,7 +66381,7 @@ function finalizeChatAssistRoundAfterUserAbort(roundMaskId, roundThreadId, round
     st.roundMaskId === roundMaskId &&
     st.roundThreadId === roundThreadId &&
     String(st.reply || "").trim()
-      ? String(st.reply || "").trim()
+      ? sanitizeAssistantVisibleText(st.reply)
       : "";
   if (partialReply) {
     const entry = { role: "assistant", content: partialReply, at: Date.now() };
@@ -66792,7 +66850,7 @@ async function runChatAssistantRoundBody(opts, btn) {
             if (roundAbortSignal.aborted) return;
             if (useOfflineStream) {
               const preview = extractOfflineAssistantStreamPreview(full);
-              if (preview) patchOfflineAssistantStreamRow(roundMaskId, roundThreadId, preview);
+              patchOfflineAssistantStreamRow(roundMaskId, roundThreadId, preview);
             } else {
               patchImAssistantStreamRow(roundMaskId, roundThreadId, full);
             }
@@ -67433,7 +67491,7 @@ async function runChatAssistantRoundBody(opts, btn) {
       abortSt &&
       abortSt.roundMaskId === roundMaskId &&
       abortSt.roundThreadId === roundThreadId
-        ? String(abortSt.reply || "").trim()
+        ? sanitizeAssistantVisibleText(abortSt.reply)
         : "";
     if (invisible && partial) {
       const entry = { role: "assistant", content: partial, at: Date.now() };
