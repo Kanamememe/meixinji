@@ -119,6 +119,11 @@
     return resolveOpenAiV1Base(url);
   }
 
+  function normalizeModel(model, baseUrl) {
+    const id = String(model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+    return getGeminiOpenAiBase(baseUrl) ? id.replace(/^models\//, "") : id;
+  }
+
   /** @param {{ baseUrl?: string, model?: string }} [cfg] */
   function normalizeStreamCapCfg(cfg) {
     return {
@@ -238,7 +243,7 @@
     return {
       baseUrl: normalizeBase(db.getKv(kv.AI_BASE) || DEFAULT_BASE),
       apiKey: String(db.getKv(kv.AI_KEY) || ""),
-      model: (String(db.getKv(kv.AI_MODEL) || DEFAULT_MODEL).trim() || DEFAULT_MODEL),
+      model: normalizeModel(db.getKv(kv.AI_MODEL), db.getKv(kv.AI_BASE)),
       temperature: normalizeTemperature(db.getKv(kv.AI_TEMPERATURE))
     };
   }
@@ -267,7 +272,7 @@
       else db.setKv(kv.AI_KEY, String(patch.apiKey));
     }
     if (patch.model != null) {
-      const m = String(patch.model).trim() || DEFAULT_MODEL;
+      const m = normalizeModel(patch.model, db.getKv(kv.AI_BASE));
       db.setKv(kv.AI_MODEL, m);
     }
     if (patch.temperature != null) {
@@ -522,7 +527,7 @@
     for (const url of urls) {
       try {
         const ids = await fetchModelIdsFromUrl(url, apiKey);
-        if (ids.length) return ids;
+        if (ids.length) return [...new Set(ids.map((id) => normalizeModel(id, rawBase)))];
         errors.push(`${url}：返回 0 条模型`);
       } catch (e) {
         const msg = e && typeof e === "object" && "message" in e ? String(e.message) : String(e);
@@ -554,6 +559,7 @@
       temperature,
       ...body
     };
+    payload.model = normalizeModel(payload.model, baseUrl);
     const doFetch = async (p) => {
       const fetchOpts = {
         method: "POST",
@@ -638,6 +644,7 @@
     };
     delete payload.stream_options;
     payload.stream = true;
+    payload.model = normalizeModel(payload.model, baseUrl);
 
     const fetchOpts = {
       method: "POST",

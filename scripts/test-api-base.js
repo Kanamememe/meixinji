@@ -10,7 +10,8 @@ const context = {
     requests.push({ url, options });
     return {
       ok: true,
-      text: async () => JSON.stringify({ data: [{ id: "gemini-test" }] }),
+      headers: { get: () => "application/json" },
+      text: async () => JSON.stringify({ data: [{ id: "models/gemini-test" }, { id: "gemini-test" }] }),
       json: async () => ({ choices: [{ message: { content: "OK" } }] })
     };
   }
@@ -33,15 +34,21 @@ async function main() {
     ["https://generativelanguage.googleapis.com.example/v1", "https://generativelanguage.googleapis.com.example/v1"]
   ]) assert.equal(api.resolveOpenAiV1Base(input), output);
 
-  const cfg = { baseUrl: `${google}/v1`, apiKey: "test-placeholder", model: "gemini-test" };
+  const cfg = { baseUrl: `${google}/v1`, apiKey: "test-placeholder", model: "models/gemini-test" };
   const models = await api.listModels(cfg);
   assert.equal(models[0], "gemini-test");
+  assert.equal(models.length, 1);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, `${expected}/models`);
   await api.chatCompletions({ messages: [{ role: "user", content: "Hi" }] }, { completionConfig: cfg });
   assert.equal(requests[1].url, `${expected}/chat/completions`);
   assert.equal(requests[1].options.headers.Authorization, "Bearer test-placeholder");
   assert.equal(JSON.parse(requests[1].options.body).model, "gemini-test");
+  await api.chatCompletionsStream({ model: "models/gemini-override", messages: [] }, { completionConfig: cfg });
+  assert.equal(JSON.parse(requests[2].options.body).model, "gemini-override");
+  const relayCfg = { ...cfg, baseUrl: "https://relay.example/v1", model: "models/custom" };
+  await api.chatCompletions({ messages: [] }, { completionConfig: relayCfg });
+  assert.equal(JSON.parse(requests[3].options.body).model, "models/custom");
   console.log("API URL regression checks passed; model listing and chat use the Gemini compatibility endpoint.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

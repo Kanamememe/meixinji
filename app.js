@@ -69051,8 +69051,15 @@ window.addEventListener("rp-auth-changed", refreshSettingsAuthStatus);
       saveAiConfigurationFromUi();
     });
 
-    document.getElementById("settings-ai-test")?.addEventListener("click", async () => {
-      saveAiConfigurationFromUi();
+    document.getElementById("settings-ai-test")?.addEventListener("click", async (event) => {
+      const testBtn = event.currentTarget;
+      if (testBtn.disabled) return;
+      if (!saveAiConfigurationFromUi()) return;
+      testBtn.disabled = true;
+      const previousLabel = testBtn.textContent;
+      testBtn.textContent = "测试中…";
+      setSettingsStatusLine("settings-ai-status", "配置已保存，正在测试 AI 连接…", "");
+      showToast("正在测试 AI 连接…");
       try {
         const reply = await ai.testPing();
         setSettingsStatusLine("settings-ai-status", `回复节选: ${reply.slice(0, 120)}`, "ok");
@@ -69061,6 +69068,9 @@ window.addEventListener("rp-auth-changed", refreshSettingsAuthStatus);
         const msg = err instanceof Error ? err.message : String(err);
         setSettingsStatusLine("settings-ai-status", msg, "err");
         showToast("AI 调用失败");
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = previousLabel;
       }
     });
 
