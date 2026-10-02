@@ -1092,12 +1092,12 @@ function patchOfflineAssistantStreamRow(maskId, threadId, previewText) {
 
 /** IM 流式：从半段 JSON 抽出已闭合 lines，逐泡预览。 */
 function patchImAssistantStreamRow(maskId, threadId, partialRaw) {
-  const complete = extractLooseAssistantLinesFromRaw(partialRaw, 12, false);
-  const joined = complete.join("|||");
-  const linesOpen = imAssistantStreamLinesArrayLikelyOpen(partialRaw);
+  // 收齐并验证这一轮后再显示，不能先漏出一半、等后续才发现是草稿。
+  const o = readStrictImAssistantPayload(partialRaw);
+  const joined = o ? coalesceAssistantDisplayReply("", partialRaw, "im") : "";
   patchAssistantStreamPreviewRow(maskId, threadId, {
     content: joined,
-    restoringSegIdx: linesOpen ? complete.length : -1
+    restoringSegIdx: o ? -1 : 0
   });
 }
 
@@ -25506,7 +25506,21 @@ function stripOfflineMeetupTagFromAssistantReply(replyJoined) {
 
 /** 仅识别独立的草稿标题，不拦截台词里的 thinking / 思考 等普通词语。 */
 function isAssistantThinkingHeading(text) {
-  return /^(?:#{1,6}\s*)?(?:\*\*|__)?(?:thinking|reasoning|analysis|思考过程|思考過程|思维链|思維鏈)(?:\*\*|__)?\s*[:：]?\s*(?:\*\*|__)?$/i.test(String(text || "").trim());
+  const label = String(text || "").trim().replace(/^[#* _]+|[* _]+$/g, "").replace(/[：:]\s*$/, "").trim();
+  return /^(?:(?:思绪|思緒|思考|思考过程|思考過程|思维链|思維鏈|内心思考|內心思考)\s*)?(?:[（(]\s*)?(?:thinking|reasoning|analysis)(?:\s*[）)])?$/i.test(label) ||
+    /^(?:思绪|思緒|思考过程|思考過程|思维链|思維鏈|回复规划|回覆規劃)$/.test(label);
+}
+
+/** IM 只接受完整 JSON 中显式的 lines，绝不从任意纯文本或其它字段猜台词。 */
+function readStrictImAssistantPayload(raw) {
+  try {
+    const o = JSON.parse(normalizeAssistantModelJsonText(stripAssistantThinkingBlocks(raw)));
+    if (!o || Array.isArray(o) || !Array.isArray(o.lines)) return null;
+    if (!o.lines.every(line => typeof line === "string")) return null;
+    // 一条带草稿标题即拒绝整轮，避免只删标题却留下后面的规划段落。
+    if (o.lines.some(assistantPlainTextLooksLikeThinkingLeak)) return null;
+    return o;
+  } catch (_) { return null; }
 }
 
 /** 剥离 JSON 字符串之外的显式草稿块；未闭合块一直隐藏到本轮结束。 */
@@ -25719,6 +25733,12 @@ function salvageAssistantDisplayReplyFromRaw(raw, opts) {
 
 /** JSON 有壳但 lines/reply 为空时，从原始输出抢救可展示正文（IM/当面通用） */
 function coalesceAssistantDisplayReply(reply, rawReply, dmSurface) {
+  if (dmSurface !== "offline") {
+    const o = readStrictImAssistantPayload(rawReply);
+    if (!o || !o.lines.some(line => line.trim())) return "";
+    const parsed = parseChatAssistantPayload(JSON.stringify(o));
+    return normalizeImAssistantReplyJoined(sanitizeAssistantVisibleText(stripOfflineMeetupTagFromAssistantReply(reply || parsed.reply)));
+  }
   let r = sanitizeAssistantVisibleText(stripOfflineMeetupTagFromAssistantReply(String(reply || "").trim()));
   if (r) return dmSurface !== "offline" ? normalizeImAssistantReplyJoined(r) : r;
   const salv = salvageAssistantDisplayReplyFromRaw(rawReply, {
@@ -25790,11 +25810,9 @@ function parseOfflineAssistantPayload(raw, salvageRaw) {
 
 /** IM：JSON lines 为空时从 salvageRaw 抢救（复用 coalesceAssistantDisplayReply） */
 function parseImAssistantPayload(raw, salvageRaw) {
-  const parsed = parseChatAssistantPayload(raw);
-  parsed.reply = sanitizeAssistantVisibleText(parsed.reply);
-  if (String(parsed.reply || "").trim()) return parsed;
-  const co = coalesceAssistantDisplayReply("", salvageRaw ?? raw, "im");
-  if (co) parsed.reply = co;
+  const o = readStrictImAssistantPayload(raw);
+  const parsed = parseChatAssistantPayload(JSON.stringify(o || { lines: [] }));
+  if (!o || !o.lines.some(line => line.trim())) parsed.reply = "";
   return parsed;
 }
 
@@ -26613,13 +26631,13 @@ function buildChatLinesOnlyRepairMessages(rawReply, dmSurface = "im") {
  * @param {number|null|undefined} maxTok
  * @param {"im"|"offline"} [dmSurface="im"]
  */
-async function tryRepairAssistantLinesOnly(ai, rawReply, maxTok, dmSurface = "im", signal) {
+async function tryRepairAssistantLinesOnly(ai, rawReply, maxTok, dmSurface = "im", signal, contextMessages) {
   const raw = String(rawReply || "").trim();
   if (!raw || raw.length < 4) return null;
   const looksAssistantJson =
     /"(?:lines|speakAs|heartVoice|narration|replies|reply)\s*"\s*:/i.test(raw) ||
     (/^\s*\{/.test(raw) && raw.includes('"'));
-  if (!looksAssistantJson) return null;
+  if (!looksAssistantJson && !Array.isArray(contextMessages)) return null;
   const surf = dmSurface === "offline" ? "offline" : "im";
   const tok =
     maxTok != null && Number.isFinite(Number(maxTok))
@@ -26629,7 +26647,9 @@ async function tryRepairAssistantLinesOnly(ai, rawReply, maxTok, dmSurface = "im
         : 2048;
   try {
     const repData = await requestChatAssistantCompletion(ai, {
-      messages: buildChatLinesOnlyRepairMessages(raw, surf),
+      messages: Array.isArray(contextMessages)
+        ? [...contextMessages, { role: "system", content: "上一轮格式不合要求，请根据原角色卡与用户消息重新作答。只输出一个完整 JSON 对象，lines 为角色真正发送给用户的台词字符串数组。禁止输出思绪、thinking、reasoning、回复规划或规则复述；不要把草稿改装成台词。心声仅放 mind 字段。示例格式：{\"lines\":[\"台词\"]}。" }]
+        : buildChatLinesOnlyRepairMessages(raw, surf),
       ...spreadOptionalMaxTokens(tok),
       response_format: { type: "json_object" },
       signal
@@ -43894,23 +43914,20 @@ function buildOfflinePromptCoreBlock(name, userCall, char, th, promptLog, heartO
  */
 function buildImThinkingOutputProtocolLines(heartOn, transOn, name, userCall, promptLog, stRepl) {
   return [
-    `[THINK · 内化思维链]`,
-    `JSON \`thinking\` 写发前半秒过程（宜 150～280 字；第一人称 murmur；可 blur/backtrack；**不是**条目清单）。${heartOn ? "收口的读者向心理放 mind.heartVoice，勿与 thinking 整段复读。" : ""}`,
-    `thinking/reasoning **不会展示、不会入库**；读者只看 lines（及可选 narration）。**禁止** thinking 顶替 lines；禁止 lines 里写英文 CoT。`,
-    ...buildThinkingChainBeatLines({ surface: "im", sceneOffline: false, name, userCall, stRepl }),
+    `角色判断与写前检查在内部完成，不输出 thinking / reasoning / 思绪 / 回复规划。`,
     `[OUTPUT · JSON]`,
     ...(heartOn
       ? [
           `一个 JSON 对象：必填 lines（字符串数组）${
             transOn ? "、lineTranslations（与 lines 等长）" : ""
-          }、必填 mind（heartVoice/innerState/mood/desire/affinity/affectionDesc）；强烈建议 thinking；可选 recalls。`,
+          }、必填 mind（heartVoice/innerState/mood/desire/affinity/affectionDesc）；可选 recalls。`,
           `mind.heartVoice：${name} 开口前真实心理（中文，**每轮必填**）；须像此人，勿复述 lines，勿套通用服软/撩人句。`,
           `mind.innerState：${name} 此刻在做什么/姿势/穿着（中文）；情绪细节放 heartVoice/mood。`,
           buildHeartVoiceAffinityContinuityPromptLine(promptLog),
           `可选 voiceLines[]/voiceSeconds[] 与 lines 等长。`
         ]
       : [
-          `一个 JSON 对象：必填 lines；强烈建议 thinking；${transOn ? "必填 lineTranslations（与 lines 等长）； " : ""}可选 recalls。勿输出 mind/heartVoice。`,
+          `一个 JSON 对象：必填 lines；${transOn ? "必填 lineTranslations（与 lines 等长）； " : ""}可选 recalls。勿输出 mind/heartVoice。`,
           `可选 voiceLines[]/voiceSeconds[] 与 lines 等长。`
         ]),
     `placeCall / 表情 / 撤回等工具用法见上文 BEHAVIOR 与各 [STICKER]/[PLACE_CALL]/[RECALL] 功能块。`,
@@ -66838,6 +66855,9 @@ async function runChatAssistantRoundBody(opts, btn) {
     const useImStream =
       roundDmSurface !== "offline" && !charLockLive && isThreadImStreamReplyEnabled(thSend0);
     const useStream = useOfflineStream || useImStream;
+    if (roundDmSurface !== "offline") {
+      apiMessages.push({ role: "system", content: "本轮输出协议：只输出一个完整 JSON 对象，必须包含 lines 字符串数组。lines 只含角色实际发出的台词，不能含思绪、thinking、推理、卡面自检、回复策略或规则说明。写前检查无需输出；上文如要求输出 thinking，本轮不输出。可按已启用功能保留 mind、翻译与其它工具字段。" });
+    }
     try {
       if (useStream) {
         data = await requestChatAssistantCompletionStream(ai, {
@@ -66896,7 +66916,8 @@ async function runChatAssistantRoundBody(opts, btn) {
         rawReply,
         maxTokPrimary,
         roundDmSurface,
-        roundAbortSignal
+        roundAbortSignal,
+        apiMessages
       );
       if (lineRepair) {
         rawReply = lineRepair.repRaw;

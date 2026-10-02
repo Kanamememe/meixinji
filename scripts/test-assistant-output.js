@@ -31,7 +31,7 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 const names = [
-  "isAssistantThinkingHeading", "stripAssistantThinkingBlocks", "sanitizeAssistantVisibleText",
+  "tryRepairAssistantLinesOnly", "buildChatLinesOnlyRepairMessages", "spreadOptionalMaxTokens", "isChatAssistAbortError", "readStrictImAssistantPayload", "isAssistantThinkingHeading", "stripAssistantThinkingBlocks", "sanitizeAssistantVisibleText",
   "assistantTopLevelFieldSource", "extractAssistantTopLevelString", "extractLooseAssistantLinesFromRaw",
   "isAssistantThinkingLeakLine", "assistantPlainTextLooksLikeThinkingLeak", "stripUtf8Bom",
   "normalizeAssistantModelJsonText", "extractJsonStringFieldLoose", "extractJsonNumberFieldLoose",
@@ -45,7 +45,8 @@ const names = [
   "patchImAssistantStreamRow", "imAssistantStreamLinesArrayLikelyOpen", "finalizeChatAssistRoundAfterUserAbort"
 ];
 for (const name of names) {
-  const start = source.indexOf(`function ${name}(`);
+  let start = source.indexOf(`function ${name}(`);
+  if (source.slice(start - 6, start) === "async ") start -= 6;
   const end = source.indexOf("\n}", start) + 2;
   assert(start >= 0 && end > start, name);
   const code = source.slice(start, end).replaceAll("catch (_) {", "catch (_) { if (_ instanceof ReferenceError) throw _;");
@@ -66,8 +67,21 @@ for (const raw of ['<think>草稿 {"lines":["伪台词"]}</think>{"lines":["我�
   assert.equal(s.parseChatAssistantPayload(raw).reply, "我在");
 }
 for (const raw of ["我在想你", "I was thinking about you", "他低头想了想，随后说：「我在。」", "这里就是我们的世界"]) {
-  for (const surf of surfaces) assert.equal(s.parseAssistantPayloadForDmSurface(raw, surf).reply, raw);
+  for (const surf of surfaces) assert.equal(s.parseAssistantPayloadForDmSurface(raw, surf).reply, surf === "im" ? "" : raw);
 }
+// Screenshot regression: renamed/bilingual headings and arbitrary unstructured prose.
+for (const heading of ["思绪（thinking）：", "思緒 (thinking) :", "**思绪（thinking）：**", "思绪", "analysis"]) {
+  const raw = heading + "\n\n她困了。\n\n得把她从胡思乱想里拽出来，语气松快点。";
+  assert.equal(s.parseImAssistantPayload(raw).reply, "");
+  assert.equal(s.coalesceAssistantDisplayReply(raw, raw, "im"), "");
+  const encoded = JSON.stringify({ lines: [heading, "她困了。", "语气松快点。"] });
+  assert.equal(s.parseImAssistantPayload(encoded).reply, "");
+  assert.equal(s.coalesceAssistantDisplayReply("草稿不能绕过校验", encoded, "im"), "");
+}
+for (const raw of ["无任何标题的草稿", '{"text":"误用字段"}', '{"lines":["未完成"]', '{"thinking":{"lines":["嵌套示例"]}}']) {
+  assert.equal(s.coalesceAssistantDisplayReply("已有预览", raw, "im"), "");
+}
+assert.equal(s.parseImAssistantPayload('{"lines":["我在，慢慢说"]}').reply, "我在，慢慢说");
 const valid = JSON.stringify({
   thinking: { text: "草稿", lines: ["草稿里的示例"] },
   lines: ["我在", "慢慢说"],
@@ -120,6 +134,21 @@ Object.assign(s, {
 s.finalizeChatAssistRoundAfterUserAbort("mask", "thread", "im", true);
 assert.equal(saved.length, 0);
 async function checkTransport() {
+  const contextMessages = [{ role: "system", content: "原角色人设" }, { role: "user", content: "用户原话" }];
+  let retryMessages;
+  s.requestChatAssistantCompletion = async (ai, opts) => {
+    retryMessages = opts.messages;
+    return { choices: [{ message: { content: '{"lines":["我在"]}' } }] };
+  };
+  const repaired = await s.tryRepairAssistantLinesOnly({}, "思绪（thinking）：草稿", 1024, "im", undefined, contextMessages);
+  assert.equal(repaired.parsed.reply, "我在");
+  assert.equal(retryMessages[0], contextMessages[0]);
+  assert.equal(retryMessages[1], contextMessages[1]);
+  assert.equal(retryMessages.length, 3);
+  assert(!retryMessages.some(m => m.content.includes("思绪（thinking）：草稿")));
+  s.requestChatAssistantCompletion = async () => ({ choices: [{ message: { content: "又是纯文字草稿" } }] });
+  assert.equal(await s.tryRepairAssistantLinesOnly({}, "草稿内容", 1024, "im", undefined, contextMessages), null);
+
   let streaming = false;
   const parts = [{ type: "text", thought: true, text: "草稿" }, { type: "text", text: "我在" }];
   const context = {
