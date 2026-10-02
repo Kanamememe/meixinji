@@ -1,0 +1,72 @@
+/* Visible reply state stays beside the composer, even when messages are scrolled. */
+#chat-reply-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--line, #d8dde5);
+  border-radius: 12px;
+  background: var(--bg-card, #fff);
+  color: var(--text-main, #17191c);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+#chat-reply-status[hidden],
+#chat-reply-status-action[hidden] {
+  display: none !important;
+}
+#chat-reply-status .chat-reply-status-copy {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+#chat-reply-status-text {
+  display: block;
+  font-weight: 600;
+}
+#chat-reply-status-elapsed {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-sub, #565e69);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+#chat-reply-status-elapsed:empty { display: none; }
+#chat-reply-status-action {
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 1px solid currentColor;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--accent, #3a5c89);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#chat-reply-status-action:disabled { opacity: .55; cursor: wait; }
+#chat-reply-status-action:focus-visible { outline: 2px solid var(--accent, #3a5c89); outline-offset: 3px; }
+#chat-reply-status[data-state="busy"] { border-color: var(--accent, #3a5c89); }
+#chat-reply-status[data-state="busy"] #chat-reply-status-text::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: chatReplyStatusSpin .9s linear infinite;
+}
+#chat-reply-status[data-state="error"] #chat-reply-status-text { color: #b42318; }
+body.dark #chat-reply-status[data-state="error"] #chat-reply-status-text { color: #ffaba5; }
+@keyframes chatReplyStatusSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  #chat-reply-status[data-state="busy"] #chat-reply-status-text::before { animation: none; }
+}

@@ -38683,6 +38683,7 @@ function finishChatMessagesRenderShell(stickerReusePool, photoReusePool, msgRowR
 }
 
 function renderChatMessages() {
+  window.requestAnimationFrame(syncChatReplyStatusForActiveThread);
   const root = document.getElementById("chat-messages");
   const allowLatestAssistAnim = chatAnimateLatestAssistantReply;
   chatAnimateLatestAssistantReply = false;
@@ -66237,6 +66238,9 @@ let chatProactivePeerScanTimerId = 0;
 let chatProactiveInFlight = false;
 /** @type {Map<string, number>} */
 const chatAssistRoundInflightByThread = new Map();
+const chatAssistRoundStartedAtByThread = new Map();
+let chatReplyStatusTimerId = 0;
+let chatReplyStatusClickPending = false;
 /** @type {Map<string, Promise<void>>} */
 const chatAssistRoundChainByThread = new Map();
 /** @type {Map<string, AbortController>} */
@@ -66356,8 +66360,13 @@ function bumpChatAssistRoundInflight(slotKey, delta) {
   const d = Math.floor(Number(delta)) || 0;
   if (!d) return;
   const next = (chatAssistRoundInflightByThread.get(key) || 0) + d;
-  if (next <= 0) chatAssistRoundInflightByThread.delete(key);
-  else chatAssistRoundInflightByThread.set(key, next);
+  if (next <= 0) {
+    chatAssistRoundInflightByThread.delete(key);
+    chatAssistRoundStartedAtByThread.delete(key);
+  } else {
+    if (!chatAssistRoundStartedAtByThread.has(key)) chatAssistRoundStartedAtByThread.set(key, Date.now());
+    chatAssistRoundInflightByThread.set(key, next);
+  }
 }
 
 function isChatAssistRoundInflightForThread(maskId, threadId) {
@@ -66371,7 +66380,76 @@ function isChatAssistRoundInflightForActiveThread() {
   return isChatAssistRoundInflightForThread(mid, tid);
 }
 
+function syncChatReplyStatusForActiveThread() {
+  window.clearTimeout(chatReplyStatusTimerId);
+  chatReplyStatusTimerId = 0;
+  const root = document.getElementById("chat-reply-status");
+  const label = document.getElementById("chat-reply-status-text");
+  const elapsed = document.getElementById("chat-reply-status-elapsed");
+  const action = document.getElementById("chat-reply-status-action");
+  if (!root || !label || !elapsed || !action) return;
+  const mid = String(getActiveMaskIdForInbox() || "").trim();
+  const tid = String(readChatActiveThreadRef().threadId || "").trim();
+  const key = chatAssistRoundSlotKey(mid, tid);
+  if (!key || !isUserViewingChatThread(mid, tid)) {
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  const busy = isChatAssistRoundInflightForThread(mid, tid);
+  const last = chatLogLastBubbleMessageForActiveUiSurface();
+  const hasDraft = Boolean(getChatComposerDraftCombinedForTokens().trim());
+  const failed = last?.role === "assistant" && String(last.content || "").startsWith("（未能回复）");
+  let text = "发送消息后，点「让角色回复」开始对话";
+  let state = "idle";
+  action.textContent = failed ? "重试回复" : "让角色回复";
+  action.hidden = hasDraft || (last?.role === "assistant" && !failed);
+  action.disabled = chatReplyStatusClickPending && !busy;
+  elapsed.textContent = "";
+  if (busy) {
+    state = "busy";
+    const partial = getChatAssistAbortCommitStateForSlot(key)?.reply;
+    text = String(partial || "").trim() || (last?.role === "assistant" && last.restoring && !failed && String(last.content || "").trim())
+      ? "角色正在回复…"
+      : "正在等待角色回复…";
+    const started = chatAssistRoundStartedAtByThread.get(key) || Date.now();
+    const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+    elapsed.textContent = `已等待 ${seconds} 秒${seconds >= 30 ? " · 仍在等待，可停止" : ""}`;
+    action.textContent = "停止回复";
+    action.hidden = false;
+    action.disabled = false;
+    chatReplyStatusTimerId = window.setTimeout(syncChatReplyStatusForActiveThread, 1000);
+  } else if (failed) {
+    state = "error";
+    text = "回复失败，请查看聊天中的错误提示";
+  } else if (last?.role === "user") {
+    text = hasDraft ? "可以继续发送；说完后点「让角色回复」" : "消息已送出，点「让角色回复」继续";
+  } else if (last?.role === "assistant") {
+    state = "done";
+    text = "角色已回复";
+  }
+  root.dataset.state = state;
+  if (label.textContent !== text) label.textContent = text;
+}
+
+document.getElementById("chat-reply-status-action")?.addEventListener("click", async () => {
+  if (isChatAssistRoundInflightForActiveThread()) {
+    abortActiveChatAssistRound();
+    return;
+  }
+  if (chatReplyStatusClickPending || getChatComposerDraftCombinedForTokens().trim()) return;
+  chatReplyStatusClickPending = true;
+  syncChatReplyStatusForActiveThread();
+  try {
+    await sendChatFromInput();
+  } finally {
+    chatReplyStatusClickPending = false;
+    syncChatReplyStatusForActiveThread();
+  }
+});
+
 function syncChatSendButtonForActiveThread() {
+  syncChatReplyStatusForActiveThread();
   const btn = document.getElementById("chat-send");
   if (!(btn instanceof HTMLButtonElement)) return;
   const busy = isChatAssistRoundInflightForActiveThread();
@@ -67645,7 +67723,7 @@ async function sendChatFromInput() {
   // 继续说：沿用原逻辑（代发一句催对方接话）。
   // 重 roll：重新调用一次 API，替换末尾连续的一段对方回复（支持文字 + 表情包拆条等），不改你方输入，不回滚更早历史。
   const lastBubble = chatLogLastBubbleMessageForActiveUiSurface();
-  if (lastBubble && lastBubble.role === "assistant") {
+  if (lastBubble && lastBubble.role === "assistant" && !String(lastBubble.content || "").startsWith("（未能回复）")) {
     openChatSendChoiceDialog();
     return;
   }
@@ -69690,6 +69768,7 @@ function renderStickerSuggestFromInput(text) {
 }
 
 function onChatComposerInput(e) {
+  syncChatReplyStatusForActiveThread();
   const el = e.currentTarget;
   if (el instanceof HTMLTextAreaElement) {
     scheduleStickerSuggestFromInput(el.value);

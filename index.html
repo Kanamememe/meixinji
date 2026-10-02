@@ -120,6 +120,7 @@
   <link rel="stylesheet" href="roam.css?v=31">
   <link rel="stylesheet" href="forum.css?v=43">
   <link rel="stylesheet" href="relation.css?v=18">
+  <link rel="stylesheet" href="chat-reply-status.css?v=1">
 </head>
 <body>
   <div class="boot-splash" id="boot-splash" aria-live="polite" aria-busy="true" aria-label="小心机 · 开屏画面，请稍后点击进入">
@@ -4165,6 +4166,13 @@
               </div>
             </div>
             <footer id="chat-composer" class="chat-composer">
+              <div id="chat-reply-status" class="chat-reply-status" hidden>
+                <div class="chat-reply-status-copy">
+                  <span id="chat-reply-status-text" role="status" aria-live="polite"></span>
+                  <span id="chat-reply-status-elapsed" aria-hidden="true"></span>
+                </div>
+                <button type="button" id="chat-reply-status-action" hidden>让角色回复</button>
+              </div>
               <div class="chat-slab">
                 <div class="chat-slab-spine" aria-hidden="true">
                   <span class="chat-slab-spine-line"></span>
